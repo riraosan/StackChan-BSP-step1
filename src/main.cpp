@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include <Arduino.h>
-#include <M5StackChan.h>
+#include <StackChan-BSP.h>
 #include <Avatar.h>
 
 using namespace m5avatar;
@@ -74,18 +74,39 @@ static int dance_index = 0;
 
 Avatar avatar;
 
+bool g_isServoTaskRunning = false;
+
+void servo(void *args)
+{
+  float gazeX, gazeY;
+  DriveContext *ctx = (DriveContext *)args;
+  Avatar *avatar = ctx->getAvatar();
+
+  for (;;)
+  {
+    if(g_isServoTaskRunning) {
+      avatar->getGaze(&gazeY, &gazeX);
+
+      if(gazeY < 0) {
+        int tmp = (int)(15.0 * gazeY);
+        if(tmp > 15) tmp = 15;
+        M5StackChan.Motion.move(90 + (int)(15.0 * gazeX), 90 + tmp, 500);
+        delay(1000);
+      } else {
+        M5StackChan.Motion.move(90 + (int)(15.0 * gazeX), 90 + (int)(15.0 * gazeY) , 500);
+        delay(1000);
+      }
+    }
+    delay(50);
+  }
+}
+
 void setup()
 {
     /* Init StackChan */
     M5StackChan.begin();
     avatar.init();
-
-    /* Setup display */
-    M5StackChan.Display().setTextSize(2);
-    M5StackChan.Display().setTextScroll(true);
-    M5StackChan.Display().setTextColor(TFT_YELLOW);
-    //M5StackChan.Display().printf("> Touch the top to start\n");
-    M5StackChan.Display().setTextColor(TFT_GREENYELLOW);
+    avatar.addTask(servo, "servo");
 
     // Disable auto angle sync for smooth and continuous movement
     M5StackChan.Motion.setAutoAngleSyncEnabled(false);
@@ -95,6 +116,7 @@ void loop()
 {
     M5StackChan.update();
     if (M5StackChan.TouchSensor.wasPressed()) {
+        g_isServoTaskRunning = false;
         delay(200);
 
         /* Perform dance */
@@ -107,11 +129,9 @@ void loop()
 
         /* Next dance */
         dance_index = (dance_index + 1) % dances.size();
-
-        M5StackChan.Display().setTextColor(TFT_YELLOW);
-        //M5StackChan.Display().printf("> Touch the top to start\n");
-        M5StackChan.Display().setTextColor(TFT_GREENYELLOW);
     }
+
+    g_isServoTaskRunning = true;
 
     delay(100);
 }
