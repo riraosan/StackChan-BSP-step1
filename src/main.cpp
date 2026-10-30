@@ -6,8 +6,23 @@
 #include <Arduino.h>
 #include <StackChan-BSP.h>
 #include <Avatar.h>
+#include "Audio.h"
+
+#define SD_CS          4
+#define SD_MOSI       37
+#define SD_MISO       35
+#define SD_SCK        36
+#define I2S_DOUT      13
+#define I2S_BCLK      34
+#define I2S_LRC       33
 
 using namespace m5avatar;
+
+static const char *TAG = "MAIN";
+
+Audio audio;
+String ssid =     "OSAKA-BASE";
+String password = "WCGy4YAw";
 
 /**
  * @brief
@@ -65,12 +80,14 @@ std::vector<Keyframe_t> dance_3 = {
 };
 
 std::vector<std::vector<Keyframe_t>*> dances = {
-    &dance_1,
+    //&dance_1,
     &dance_2,
     &dance_3,
 };
 
 static int dance_index = 0;
+
+static int flag = 0;
 
 Avatar avatar;
 
@@ -87,14 +104,13 @@ void servo(void *args)
     if(g_isServoTaskRunning) {
       avatar->getGaze(&gazeY, &gazeX);
 
-      if(gazeY < 0) {
-        int tmp = (int)(15.0 * gazeY);
-        if(tmp > 15) tmp = 15;
-        M5StackChan.Motion.move(90 + (int)(15.0 * gazeX), 90 + tmp, 500);
-        delay(1000);
-      } else {
-        M5StackChan.Motion.move(90 + (int)(15.0 * gazeX), 90 + (int)(15.0 * gazeY) , 500);
-        delay(1000);
+      M5StackChan.Motion.move(90 + (int)(120.0 * gazeX), 90 + (int)(120.0 * gazeY) , 500);
+      delay(1000);
+
+      if(flag == 1){
+        M5StackChan.Motion.move(90, 90, 500);
+        delay(500);
+        flag = 0;
       }
     }
     delay(50);
@@ -103,10 +119,34 @@ void servo(void *args)
 
 void setup()
 {
-    /* Init StackChan */
+   // Audio::audio_info_callback = my_audio_info;
+
     M5StackChan.begin();
+
+    pinMode(SD_CS, OUTPUT);
+    digitalWrite(SD_CS, HIGH);
+    SPI.begin(SD_SCK, SD_MISO, SD_MOSI);
+    SPI.setFrequency(1000000);
+    SD.begin(SD_CS);
+
+    audio.setPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
+    audio.setVolume(15); // 0...21
+
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid.c_str(), password.c_str());
+    while (!WiFi.isConnected()) {
+      delay(10);
+    }
+    ESP_LOGI(TAG, "Connected");
+    ESP_LOGI(TAG, "Starting MP3...\n");
+
+//  audio.connecttoFS(SD, "/320k_test.mp3");
+//  audio.connecttoFS(SD, "test.wav");
+    audio.connecttohost("http://air.ofr.fm:8008/jazz/mp3/128");
+
+    /* Init StackChan */
     avatar.init();
-    avatar.addTask(servo, "servo");
+    avatar.addTask(servo, "servo", 4096);
 
     // Disable auto angle sync for smooth and continuous movement
     M5StackChan.Motion.setAutoAngleSyncEnabled(false);
@@ -115,10 +155,12 @@ void setup()
 void loop()
 {
     M5StackChan.update();
+    audio.loop();
+
     if (M5StackChan.TouchSensor.wasPressed()) {
         g_isServoTaskRunning = false;
         delay(200);
-
+        log_i("enter1");
         /* Perform dance */
         //M5StackChan.Display().printf("> Dance #%d!\n", dance_index + 1);
         for (const auto& frame : *dances[dance_index]) {
@@ -131,7 +173,14 @@ void loop()
         dance_index = (dance_index + 1) % dances.size();
     }
 
+    auto t = M5.Touch.getDetail();
+
+    if(t.wasPressed()){
+        log_i("enter2");
+        flag = 1;
+    }
+
     g_isServoTaskRunning = true;
 
-    delay(100);
+    delay(1);
 }
