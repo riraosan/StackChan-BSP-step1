@@ -17,14 +17,14 @@ static AudioFileSourceHTTPStream *file = nullptr;
 static AudioFileSourceBuffer *buff = nullptr;
 static AudioGeneratorMP3 *mp3 = nullptr;
 
-static const char *STREAM_URL = "http://listen.181fm.com/181-beatles_128k.mp3";
+static const char *STREAM_URL = "http://livestreaming-node-2.srg-ssr.ch/srgssr/rsp/mp3/128";
 
 // ログ確認用
 void StatusCallback(void *cbData, int code, const char *string) {
-  Serial.printf("status(%d): %s\n", code, string);
+  log_i("status(%d): %s\n", code, string);
 }
 void MDCallback(void *cbData, const char *type, bool isUnicode, const char *string) {
-  Serial.printf("meta: %s = %s\n", type, string);
+  log_i("meta: %s = %s\n", type, string);
 }
 
 #define SD_CS          4
@@ -40,8 +40,8 @@ using namespace m5avatar;
 static const char *TAG = "MAIN";
 
 //for 2.4GHz WiFi
-String ssid =     "xxxx";
-String password = "xxxx";
+String ssid =     "俺のiPhone";
+String password = "room03601";
 
 /**
  * @brief
@@ -117,7 +117,7 @@ static void audioTask(void *) {
     if (mp3 && mp3->isRunning()) {
       if (!mp3->loop()) {
         mp3->stop();
-        Serial.println("MP3 stopped");
+        log_i("MP3 stopped");
       }
     }
     vTaskDelay(1);
@@ -156,7 +156,7 @@ void servo(void *args)
         flag = 0;
       }
     }
-    delay(50);
+    delay(1);
   }
 }
 
@@ -179,30 +179,30 @@ void lipSync(void *args)
     avatar->getGaze(&gazeY, &gazeX);
     avatar->setRotation(gazeX * 5);
 
-    delay(50);
+    delay(1);
   }
 }
 
 void setup()
 {
-  Serial.begin(115200);
+  log_i("Setup");
   M5StackChan.begin();
-
   M5.Speaker.setVolume(100);   // 0〜255
-
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);
-  WiFi.begin(ssid.c_str(), password.c_str());
-  while (!WiFi.isConnected()) delay(10);
-  Serial.println("WiFi connected");
-
-  startRadio();
-  xTaskCreatePinnedToCore(audioTask, "audio", 16384, nullptr, 5, nullptr, 0);
 
   avatar.init();
   avatar.addTask(servo, "servo", 4096);
   avatar.addTask(lipSync, "lipsync");
   M5StackChan.Motion.setAutoAngleSyncEnabled(false);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.begin(ssid.c_str(), password.c_str());
+  while (!WiFi.isConnected()) delay(10);
+  log_i("WiFi connected");
+
+  startRadio();
+  xTaskCreatePinnedToCore(audioTask, "audio", 16384, nullptr, 5, nullptr, 0);
+
 }
 
 void loop()
