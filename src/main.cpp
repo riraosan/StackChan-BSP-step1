@@ -1,12 +1,31 @@
 /*
- * SPDX-FileCopyrightText: 2026 M5Stack Technology CO LTD
+ * RIRAOSAN
  *
- * SPDX-License-Identifier: MIT
+ * Licensed under the MIT License
  */
 #include <Arduino.h>
+#include <WiFi.h>
 #include <StackChan-BSP.h>
 #include <Avatar.h>
-#include "Audio.h"
+#include <AudioFileSourceHTTPStream.h>
+#include <AudioFileSourceBuffer.h>
+#include <AudioGeneratorMP3.h>
+#include "AudioOutputM5Speaker.h"
+
+static AudioOutputM5Speaker out(&M5.Speaker, 0);
+static AudioFileSourceHTTPStream *file = nullptr;
+static AudioFileSourceBuffer *buff = nullptr;
+static AudioGeneratorMP3 *mp3 = nullptr;
+
+static const char *STREAM_URL = "http://listen.181fm.com/181-beatles_128k.mp3";
+
+// ログ確認用
+void StatusCallback(void *cbData, int code, const char *string) {
+  Serial.printf("status(%d): %s\n", code, string);
+}
+void MDCallback(void *cbData, const char *type, bool isUnicode, const char *string) {
+  Serial.printf("meta: %s = %s\n", type, string);
+}
 
 #define SD_CS          4
 #define SD_MOSI       37
@@ -20,9 +39,9 @@ using namespace m5avatar;
 
 static const char *TAG = "MAIN";
 
-Audio audio;
-String ssid =     "OSAKA-BASE";
-String password = "WCGy4YAw";
+//for 2.4GHz WiFi
+String ssid =     "xxxx";
+String password = "xxxx";
 
 /**
  * @brief
@@ -93,6 +112,30 @@ Avatar avatar;
 
 bool g_isServoTaskRunning = false;
 
+static void audioTask(void *) {
+  for (;;) {
+    if (mp3 && mp3->isRunning()) {
+      if (!mp3->loop()) {
+        mp3->stop();
+        Serial.println("MP3 stopped");
+      }
+    }
+    vTaskDelay(1);
+  }
+}
+
+static void startRadio() {
+  file = new AudioFileSourceHTTPStream(STREAM_URL);
+  file->RegisterStatusCB(StatusCallback, nullptr);
+
+  buff = new AudioFileSourceBuffer(file, 65536);
+  buff->RegisterStatusCB(StatusCallback, nullptr);
+
+  mp3 = new AudioGeneratorMP3();
+  mp3->RegisterStatusCB(StatusCallback, nullptr);
+  mp3->begin(buff, &out);
+}
+
 void servo(void *args)
 {
   float gazeX, gazeY;
@@ -117,59 +160,64 @@ void servo(void *args)
   }
 }
 
+void lipSync(void *args)
+{
+  float gazeX, gazeY;
+  int level = 0;
+  DriveContext *ctx = (DriveContext *)args;
+  Avatar *avatar = ctx->getAvatar();
+
+  for (;;){
+    level = abs(*out.getBuffer());
+    if(level<1500) level = 0;
+    if(level > 15000)
+    {
+      level = 15000;
+    }
+    float open = (float)level/15000.0;
+    avatar->setMouthOpenRatio(open);
+    avatar->getGaze(&gazeY, &gazeX);
+    avatar->setRotation(gazeX * 5);
+
+    delay(50);
+  }
+}
+
 void setup()
 {
-   // Audio::audio_info_callback = my_audio_info;
+  Serial.begin(115200);
+  M5StackChan.begin();
 
-    M5StackChan.begin();
+  M5.Speaker.setVolume(100);   // 0〜255
 
-    pinMode(SD_CS, OUTPUT);
-    digitalWrite(SD_CS, HIGH);
-    SPI.begin(SD_SCK, SD_MISO, SD_MOSI);
-    SPI.setFrequency(1000000);
-    SD.begin(SD_CS);
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.begin(ssid.c_str(), password.c_str());
+  while (!WiFi.isConnected()) delay(10);
+  Serial.println("WiFi connected");
 
-    audio.setPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
-    audio.setVolume(15); // 0...21
+  startRadio();
+  xTaskCreatePinnedToCore(audioTask, "audio", 16384, nullptr, 5, nullptr, 0);
 
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(ssid.c_str(), password.c_str());
-    while (!WiFi.isConnected()) {
-      delay(10);
-    }
-    ESP_LOGI(TAG, "Connected");
-    ESP_LOGI(TAG, "Starting MP3...\n");
-
-//  audio.connecttoFS(SD, "/320k_test.mp3");
-//  audio.connecttoFS(SD, "test.wav");
-    audio.connecttohost("http://air.ofr.fm:8008/jazz/mp3/128");
-
-    /* Init StackChan */
-    avatar.init();
-    avatar.addTask(servo, "servo", 4096);
-
-    // Disable auto angle sync for smooth and continuous movement
-    M5StackChan.Motion.setAutoAngleSyncEnabled(false);
+  avatar.init();
+  avatar.addTask(servo, "servo", 4096);
+  avatar.addTask(lipSync, "lipsync");
+  M5StackChan.Motion.setAutoAngleSyncEnabled(false);
 }
 
 void loop()
 {
     M5StackChan.update();
-    audio.loop();
-
     if (M5StackChan.TouchSensor.wasPressed()) {
         g_isServoTaskRunning = false;
         delay(200);
         log_i("enter1");
-        /* Perform dance */
-        //M5StackChan.Display().printf("> Dance #%d!\n", dance_index + 1);
+
         for (const auto& frame : *dances[dance_index]) {
             M5StackChan.Motion.move(frame.x, frame.y, frame.speed);
             delay(frame.interval);
         }
-        //M5StackChan.Display().printf("> Finished!\n");
 
-        /* Next dance */
         dance_index = (dance_index + 1) % dances.size();
     }
 
