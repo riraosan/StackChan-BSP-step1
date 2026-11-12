@@ -7,25 +7,27 @@
 #include <WiFi.h>
 #include <StackChan-BSP.h>
 #include <Avatar.h>
-#include <AudioFileSourceHTTPStream.h>
-#include <AudioFileSourceBuffer.h>
-#include <AudioGeneratorMP3.h>
-#include "AudioOutputM5Speaker.h"
+//#include <AudioFileSourceHTTPStream.h>
+//#include <AudioFileSourceBuffer.h>
+//#include <AudioGeneratorMP3.h>
+//#include "AudioOutputM5Speaker.h"
+#include <SanoTTS.h>
+#include <SanoTTSSpeakerM5.h>
 
-static AudioOutputM5Speaker out(&M5.Speaker, 0);
-static AudioFileSourceHTTPStream *file = nullptr;
-static AudioFileSourceBuffer *buff = nullptr;
-static AudioGeneratorMP3 *mp3 = nullptr;
+//static AudioOutputM5Speaker out(&M5.Speaker, 0);
+//static AudioFileSourceHTTPStream *file = nullptr;
+//static AudioFileSourceBuffer *buff = nullptr;
+//static AudioGeneratorMP3 *mp3 = nullptr;
 
 static const char *STREAM_URL = "http://livestreaming-node-2.srg-ssr.ch/srgssr/rsp/mp3/128";
 
 // ログ確認用
-void StatusCallback(void *cbData, int code, const char *string) {
-  log_i("status(%d): %s\n", code, string);
-}
-void MDCallback(void *cbData, const char *type, bool isUnicode, const char *string) {
-  log_i("meta: %s = %s\n", type, string);
-}
+//void StatusCallback(void *cbData, int code, const char *string) {
+//  log_i("status(%d): %s\n", code, string);
+//}
+//void MDCallback(void *cbData, const char *type, bool isUnicode, const char *string) {
+//  log_i("meta: %s = %s\n", type, string);
+//}
 
 #define SD_CS          4
 #define SD_MOSI       37
@@ -104,14 +106,106 @@ std::vector<std::vector<Keyframe_t>*> dances = {
     &dance_3,
 };
 
+static const float kMouthRefRms = 2500.0f;
+
+class LipSyncSpeaker : public SanoTTSSpeakerM5 {
+public:
+  bool beginUtterance(size_t n) override {
+    m_playing = false;
+    m_head = m_tail = 0;
+    m_written = 0;
+    return SanoTTSSpeakerM5::beginUtterance(n);
+  }
+  bool prerollPush(const int16_t* pcm, size_t n) override {
+    push(pcm, n);
+    return SanoTTSSpeakerM5::prerollPush(pcm, n);
+  }
+  bool start() override {
+    m_t0 = millis();
+    m_playing = true;
+    return SanoTTSSpeakerM5::start();
+  }
+  bool write(const int16_t* pcm, size_t n) override {
+    push(pcm, n);                       /* write() はキューが空くまでブロックするので先に記録 */
+    return SanoTTSSpeakerM5::write(pcm, n);
+  }
+  void stop() override {
+    SanoTTSSpeakerM5::stop();           /* 鳴り終わるまで待ってから */
+    m_playing = false;
+  }
+
+  /* 今この瞬間に鳴っているチャンクの口の開き具合 (0..1)。loop() から呼ぶ。 */
+  float mouthOpenRatio() {
+    if (!m_playing) return 0.0f;
+    const uint32_t pos = (uint32_t)((uint64_t)(millis() - m_t0) * SanoTTS::kSampleRate / 1000);
+    while (m_head != m_tail && m_ring[m_head].end <= pos) m_head = (m_head + 1) % kRing;
+    if (m_head == m_tail || m_ring[m_head].start > pos) return 0.0f;
+    return m_ring[m_head].level;
+  }
+
+private:
+  struct Entry { uint32_t start, end; float level; };
+  /* 書き手（TTS タスク）は再生より数チャンク先行するだけなので 32 で足りる */
+  static const size_t kRing = 32;
+
+  void push(const int16_t* pcm, size_t n) {
+    uint64_t sq = 0;
+    for (size_t i = 0; i < n; ++i) sq += (int32_t)pcm[i] * (int32_t)pcm[i];
+    const float rms = n ? sqrtf((float)sq / (float)n) : 0.0f;
+    float level = rms / kMouthRefRms;
+    if (level > 1.0f) level = 1.0f;
+
+    const size_t next = (m_tail + 1) % kRing;
+    if (next == m_head) return;         /* 満杯なら捨てる（起きない想定） */
+    m_ring[m_tail] = { m_written, (uint32_t)(m_written + n), level };
+    m_written += n;
+    m_tail = next;
+  }
+
+  Entry m_ring[kRing];
+  volatile size_t m_head = 0, m_tail = 0;   /* 書き手 1 / 読み手 1 */
+  uint32_t m_written = 0;
+  uint32_t m_t0 = 0;
+  volatile bool m_playing = false;
+};
+
+SanoTTS tts;
+LipSyncSpeaker spk;
+Avatar avatar;
+
+static const char* kLines[] = {
+  "こんにちは。私はスタックチャンです。",
+  "今日は良い天気ですね。",
+  "電池の残量は八十五パーセントです。",
+  "画面をタッチすると、次の文を喋ります。",
+};
+static const size_t kNumLines = sizeof(kLines) / sizeof(kLines[0]);
+static const char* kKanaLine = "きょ][おわよ][いて][んきです°ね";
+
+static QueueHandle_t g_queue;           /* const char* を積む */
+
+static void ttsTask(void*) {
+  const char* text;
+  for (;;) {
+    if (xQueueReceive(g_queue, &text, portMAX_DELAY) != pdTRUE) continue;
+    avatar.setSpeechText(text);
+    if (!tts.say(text)) Serial.println(tts.lastError());
+    else Serial.printf("%s (%u samples, absmax %d)\n", text,
+                       (unsigned)tts.samples(), (int)tts.absmax());
+    avatar.setSpeechText("");
+  }
+}
+
+static void say(const char* text) {
+  xQueueSend(g_queue, &text, 0);        /* 喋っている最中なら後回し（最大 4 件） */
+}
+
 static int dance_index = 0;
 
 static int flag = 0;
 
-Avatar avatar;
-
 bool g_isServoTaskRunning = false;
-
+/*
 static void audioTask(void *) {
   for (;;) {
     if (mp3 && mp3->isRunning()) {
@@ -135,6 +229,7 @@ static void startRadio() {
   mp3->RegisterStatusCB(StatusCallback, nullptr);
   mp3->begin(buff, &out);
 }
+*/
 
 void servo(void *args)
 {
@@ -160,6 +255,7 @@ void servo(void *args)
   }
 }
 
+/*
 void lipSync(void *args)
 {
   float gazeX, gazeY;
@@ -182,16 +278,18 @@ void lipSync(void *args)
     delay(1);
   }
 }
+*/
 
 void setup()
 {
   log_i("Setup");
   M5StackChan.begin();
-  M5.Speaker.setVolume(100);   // 0〜255
+  M5.Speaker.setVolume(150);   // 0〜255
 
+  avatar.setSpeechFont(&fonts::efontJA_16);   /* 吹き出しを日本語で */
   avatar.init();
   avatar.addTask(servo, "servo", 4096);
-  avatar.addTask(lipSync, "lipsync");
+  //avatar.addTask(lipSync, "lipsync");
   M5StackChan.Motion.setAutoAngleSyncEnabled(false);
 
   WiFi.mode(WIFI_STA);
@@ -200,8 +298,17 @@ void setup()
   while (!WiFi.isConnected()) delay(10);
   log_i("WiFi connected");
 
-  startRadio();
-  xTaskCreatePinnedToCore(audioTask, "audio", 16384, nullptr, 5, nullptr, 0);
+  tts.setSpeaker(&spk);
+  if (!tts.begin()) { Serial.println(tts.lastError()); return; }
+  Serial.printf("kanji: %s\n", tts.kanjiReady() ? "ready" : "NOT ready (dict missing)");
+
+  g_queue = xQueueCreate(4, sizeof(const char*));
+  xTaskCreatePinnedToCore(ttsTask, "tts", 16384, nullptr, 2, nullptr, PRO_CPU_NUM);
+
+  say(tts.kanjiReady() ? kLines[0] : kKanaLine);
+
+  //startRadio();
+  //xTaskCreatePinnedToCore(audioTask, "audio", 16384, nullptr, 5, nullptr, 0);
 
 }
 
@@ -221,10 +328,12 @@ void loop()
         dance_index = (dance_index + 1) % dances.size();
     }
 
+    static size_t idx = 1;
     auto t = M5.Touch.getDetail();
 
     if(t.wasPressed()){
-        log_i("enter2");
+        say(tts.kanjiReady() ? kLines[idx] : kKanaLine);
+        idx = (idx + 1) % kNumLines;
         flag = 1;
     }
 
